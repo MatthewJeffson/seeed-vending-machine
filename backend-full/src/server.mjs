@@ -2,8 +2,9 @@ import express from 'express';
 import cors from 'cors';
 import path from 'path';
 import { nanoid } from 'nanoid';
-import { readCsv, writeCsv, appendCsv, nowIso } from './csvStore.js';
-import * as device from './deviceTools.js';
+import { readCsv, writeCsv, appendCsv, nowIso } from './csvStore.mjs';
+import * as device from './deviceTools.mjs';
+import { readProducts, writeProducts, readCards, writeCards } from './dataMap.mjs';
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -12,13 +13,11 @@ app.use(cors());
 app.use(express.json({ limit: '1mb' }));
 app.use(express.static('public'));
 
-const productHeaders = ['product_id','product_name','slot_id','servo_id','price','inventory','low_stock_threshold','active','tag','description','feature_1','feature_2','feature_3','image_path','product_url'];
 const customerHeaders = ['user_name','total_paid','total_orders','last_order_number','created_at','updated_at'];
 const orderHeaders = ['order_number','user_name','product_id','product_name','quantity','amount_paid','status','rfid_card_uid','written_payload','created_at','written_at','verified_at','dispensed_at','frontend_id','notes'];
 const inventoryLogHeaders = ['time','action','product_id','product_name','quantity_delta','inventory_after','actor','notes'];
 const writerJobHeaders = ['job_id','order_number','user_name','rfid_payload','rfid_card_uid','status','created_at','claimed_at','written_at','device_id','message','job_type'];
 const deviceStatusHeaders = ['device_id','device_type','server_connected','rfid_ready','card_present','last_card_uid','current_job_id','last_seen_at','message'];
-const cardHeaders = ['card_uid','user_name','balance','status','created_at','updated_at','last_payload','notes'];
 const cardLedgerHeaders = ['time','card_uid','user_name','type','amount','balance_after','actor','notes'];
 
 const validOrderStartStates = new Set(['RFID_WRITTEN']);
@@ -74,13 +73,13 @@ function friendlyCardError(result) {
 // Reserve stock and create an order row. Throws Error with .code for HTTP status.
 async function createOrderRecord({ user_name, product_id, quantity, amount_paid, rfid_card_uid, status, notes }) {
   const qty = toNumber(quantity, 1);
-  const rawProducts = await readCsv('products.csv');
+  const rawProducts = await readProducts();
   const product = rawProducts.find(p => p.product_id === product_id);
   if (!product || String(product.active) !== 'true') { const e = new Error('product unavailable'); e.code = 404; throw e; }
   if (toNumber(product.inventory) < qty) { const e = new Error('not enough inventory'); e.code = 409; throw e; }
 
   product.inventory = String(toNumber(product.inventory) - qty);
-  await writeCsv('products.csv', rawProducts, productHeaders);
+  await writeProducts(rawProducts);
 
   const order_number = makeOrderNumber();
   const written_payload = makeWriterPayload(user_name, order_number);
@@ -109,7 +108,7 @@ async function createOrderRecord({ user_name, product_id, quantity, amount_paid,
 }
 
 async function getProducts() {
-  const products = await readCsv('products.csv');
+  const products = await readProducts();
   return products.map(p => ({
     ...p,
     price: toNumber(p.price),
@@ -166,7 +165,7 @@ app.get('/api/health', (req, res) => {
 app.get('/api/dashboard', async (req, res, next) => {
   try {
     const [products, customers, orders, inventory_logs, devices, writer_jobs, device_status, cards, card_ledger] = await Promise.all([
-      getProducts(), readCsv('customers.csv'), readCsv('orders.csv'), readCsv('inventory_log.csv'), readCsv('devices.csv'), readCsv('writer_jobs.csv'), readCsv('device_status.csv'), readCsv('cards.csv'), readCsv('card_ledger.csv')
+      getProducts(), readCsv('customers.csv'), readCsv('orders.csv'), readCsv('inventory_log.csv'), readCsv('devices.csv'), readCsv('writer_jobs.csv'), readCsv('device_status.csv'), readCards(), readCsv('card_ledger.csv')
     ]);
     const metrics = summarizeMetrics(products, customers, orders, writer_jobs, cards);
     res.json({
@@ -196,11 +195,11 @@ app.post('/api/products/:productId/refill', async (req, res, next) => {
   try {
     const qty = toNumber(req.body.quantity, 0);
     if (qty <= 0) return res.status(400).json({ ok: false, error: 'quantity must be positive' });
-    const rawProducts = await readCsv('products.csv');
+    const rawProducts = await readProducts();
     const product = rawProducts.find(p => p.product_id === req.params.productId);
     if (!product) return res.status(404).json({ ok: false, error: 'product not found' });
     product.inventory = String(toNumber(product.inventory) + qty);
-    await writeCsv('products.csv', rawProducts, productHeaders);
+    await writeProducts(rawProducts);
     await appendCsv('inventory_log.csv', { time: nowIso(), action: 'REFILL', product_id: product.product_id, product_name: product.product_name, quantity_delta: qty, inventory_after: product.inventory, actor: 'dashboard', notes: req.body.notes || '' }, inventoryLogHeaders);
     res.json({ ok: true, product });
   } catch (err) { next(err); }
@@ -261,7 +260,7 @@ app.post('/api/cards/topup-and-write', requireLocalTools, async (req, res, next)
     if (!Number.isFinite(amt) || amt < 0) return res.status(400).json({ ok: false, error: 'amount must be a non-negative number' });
     if (!['add', 'set'].includes(mode)) return res.status(400).json({ ok: false, error: 'mode must be add or set' });
 
-    const cards = await readCsv('cards.csv');
+    const cards = await readCards();
     let uid = String(card_uid || '').trim();
     let currentBalance = 0;
 
@@ -288,13 +287,13 @@ app.post('/api/cards/topup-and-write', requireLocalTools, async (req, res, next)
     uid = write.uid || uid || 'UNKNOWN';
 
     let card = cards.find(c => c.card_uid === uid);
-    if (!card) { card = { card_uid: uid, user_name, balance: '0', status: 'ACTIVE', created_at: nowIso(), updated_at: '', last_payload: '', notes: '' }; cards.push(card); }
+    if (!card) { card = { card_uid: uid, user_name, mode: 'DIRECT', balance: '0', status: 'ACTIVE', created_at: nowIso(), updated_at: '', last_payload: '', notes: '' }; cards.push(card); }
     card.user_name = user_name;
     card.balance = String(newBalance);
     card.status = 'ACTIVE';
     card.updated_at = nowIso();
     card.last_payload = payload;
-    await writeCsv('cards.csv', cards, cardHeaders);
+    await writeCards(cards);
 
     await appendCsv('card_ledger.csv', { time: nowIso(), card_uid: uid, user_name, type: mode === 'set' ? 'SET' : 'TOPUP', amount: String(amt), balance_after: String(newBalance), actor: 'operator', notes: '' }, cardLedgerHeaders);
 
@@ -411,7 +410,7 @@ app.post('/api/frontend/verify-card', requireDevice, async (req, res, next) => {
     order.frontend_id = req.device.device_id;
     if (rfid_card_uid) order.rfid_card_uid = rfid_card_uid;
     await writeCsv('orders.csv', orders, orderHeaders);
-    const products = await readCsv('products.csv');
+    const products = await readProducts();
     const product = products.find(p => p.product_id === order.product_id);
     res.json({ ok: true, allow_dispense: true, order_number: order.order_number, product_id: order.product_id, product_name: order.product_name, quantity: toNumber(order.quantity, 1), slot_id: product?.slot_id || '', servo_id: product?.servo_id || '', message: 'Card verified. Dispense the reserved item now.' });
   } catch (err) { next(err); }
@@ -439,11 +438,11 @@ app.post('/api/orders/:orderNumber/cancel', async (req, res, next) => {
     if (!order) return res.status(404).json({ ok: false, error: 'order not found' });
     if (order.status === 'DISPENSED') return res.status(409).json({ ok: false, error: 'cannot cancel dispensed order' });
     if (order.status !== 'CANCELLED') {
-      const rawProducts = await readCsv('products.csv');
+      const rawProducts = await readProducts();
       const product = rawProducts.find(p => p.product_id === order.product_id);
       if (product) {
         product.inventory = String(toNumber(product.inventory) + toNumber(order.quantity));
-        await writeCsv('products.csv', rawProducts, productHeaders);
+        await writeProducts(rawProducts);
         await appendCsv('inventory_log.csv', { time: nowIso(), action: 'CANCEL_RELEASE_STOCK', product_id: product.product_id, product_name: product.product_name, quantity_delta: toNumber(order.quantity), inventory_after: product.inventory, actor: 'dashboard', notes: req.params.orderNumber }, inventoryLogHeaders);
       }
       order.status = 'CANCELLED';

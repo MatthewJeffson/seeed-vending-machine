@@ -1,4 +1,1 @@
 time,card_uid,user_name,type,amount,balance_after,actor,notes
-2026-07-02T01:34:07.077Z,71 B1 49 A0,matthew,TOPUP,50,50,operator,
-2026-07-02T02:42:24.213Z,21 0E 4A A0,matthew,TOPUP,49,49,operator,
-2026-07-02T02:42:29.033Z,21 0E 4A A0,matthew,TOPUP,49,98,operator,

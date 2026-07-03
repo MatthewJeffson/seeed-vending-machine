@@ -1,2 +1,1 @@
 time,action,product_id,product_name,quantity_delta,inventory_after,actor,notes
-2026-07-02T02:34:28.766Z,RESERVE_FOR_ORDER,P001,XIAO ESP32-S3 Sense,-1,9,backend-center,ORD-20260702023428-IRVHYP
